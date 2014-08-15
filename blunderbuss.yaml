@@ -1,0 +1,6 @@
+download_path: /tmp/Torrents/
+history_file: /tmp/Torrents/.blunderbuss_history
+log_file: /var/tmp/blunderbuss.log
+feeds:
+  - https://ezrss.it/search/index.php?show_name=The+Daily+Show&date=&quality=&release_group=&mode=rss
+  - http://showrss.info/rss.php?user_id=123456&hd=null&proper=null&magnets=false
