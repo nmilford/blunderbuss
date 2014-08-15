@@ -77,9 +77,9 @@ module Blunderbuss
         @log.debug("Downloading #{url}.")
       rescue
         @log.error("Error downloading #{url}, skipping.")
-        return false, nil
+        return nil
       end
-      return true, torrent
+      return torrent
     end
 
     def run
@@ -98,9 +98,9 @@ module Blunderbuss
 
           next if in_history?(record)
 
-          download_success, torrent = download_torrent(url)
+          torrent = download_torrent(url)
 
-          if download_success
+          unless torrent.nil?
             save_torrent(torrent, item.title)
             add_to_history(record)
           end
