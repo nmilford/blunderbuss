@@ -112,11 +112,34 @@ module Blunderbuss
   end
 end
 
+Process.daemon(true)
 
 config_file = ENV['HOME'] + "/.blunderbuss.yaml"
-
 config = YAML.load_file(config_file)
 
-Blunderbuss::Runner.new(config).run
+#Signal.trap("HUP") { $stdout.puts "SIGHUP and exit"; exit }
+#Signal.trap("INT") { $stdout.puts "SIGINT and exit"; exit }
+#Signal.trap("QUIT") { $stdout.puts "SIGQUIT and exit"; exit }
 
-# TODO: Daemonize.  Add CLI config. Gemify. Profit...
+trap "INT" do 
+  $stdout.puts 'Cleaning up and exiting.'
+  FileUtils.rm(config['pid_file'])
+  exit
+end
+
+if config['daemon']
+  File.open(config['pid_file'], "w") do |f|
+    f.write(Process.pid)
+  end
+
+  begin
+    loop do 
+      pid = fork { Blunderbuss::Runner.new(config).run }
+      Process.waitpid(pid)
+      sleep(config['interval'])
+    end
+  rescue SystemExit, Interrupt
+    FileUtils.rm(config['pid_file'])
+    puts 'terminated'
+  end
+end
