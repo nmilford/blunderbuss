@@ -1,0 +1,190 @@
+#!/usr/bin/env ruby
+require 'fileutils'
+require 'trollop'
+require 'open-uri'
+require 'logger'
+require 'digest'
+require 'pstore'
+require 'dante'
+require 'yaml'
+require 'rss'
+
+module Blunderbuss
+  class Runner
+    def initialize(opts = {})
+      @history      = []
+      @feeds        = YAML.load_file(opts[:feed_yaml])['feeds']
+      @path         = opts[:path]
+      @hist_file    = opts[:hist_file]
+      @log_file     = opts[:log_file]
+
+      FileUtils.touch(@log_file)  unless File.exists?(@log_file)
+
+      @log = Logger.new(@log_file)
+      @log.level = Logger::INFO
+      @log.info("Starting Blunderbuss Runner.")
+    end
+
+    def load_history
+      db = PStore.new(@hist_file)
+      @history = db.transaction { db[:blunderbuss] }
+
+      # Pstore is empty on the initial run so it clobbers the array, so  fix it.
+      @history = [] if @history.nil?
+
+      @log.debug("#{@history.length} history records loaded from #{@hist_file}.")
+    end
+
+    def in_history?(record)
+       if @history.include?(record)
+        @log.debug("#{record} exists in history, skipping.")
+        return true
+      else
+        @log.debug("#{record} does not exist in history, continuing.")
+        return false
+      end
+    end
+
+    def add_to_history(record)
+      @history.push(record)
+      @log.debug("#{record} added to history.")
+    end
+
+    def write_history!
+      @history.compact!
+      @history.sort!
+      @history.uniq!
+
+      db = PStore.new(@hist_file)
+      db.transaction { db[:blunderbuss] = @history }
+
+      @log.debug("Wrote #{@history.length} history records to #{@history_file}.")
+    end
+
+    def sanitize_url(link)
+      URI.encode(link).gsub("[","%5B").gsub("]","%5D")
+    end
+
+    def save_torrent(torrent, filename)
+      target = @path + filename.gsub("/","-") + ".torrent"
+
+      unless File.exists?(target)
+        File.open(target, 'wb') do |file|
+          file.write(torrent.read)
+        end
+        @log.info("Wrote torrent: #{target}.")
+      else
+        @log.warn("Torrent exists, not overwriting: #{target}.")
+      end
+    end
+
+    def download_torrent(url)
+      begin
+        torrent = open(url)
+        @log.info("Downloading #{url}.")
+      rescue
+        @log.error("Error downloading #{url}, skipping.")
+        return nil
+      end
+      return torrent
+    end
+
+    def run
+      load_history
+
+      @feeds.each do |feed|
+        rss = RSS::Parser.parse(feed, false)
+        rss.items.each do |item|
+          next if item.link.nil?
+
+          link = item.enclosure.url rescue item.link
+          url = sanitize_url(link)
+          record = Digest::MD5.hexdigest(link)
+
+          @log.debug("Record for #{link} is #{record}.")
+
+          next if in_history?(record)
+
+          torrent = download_torrent(url)
+
+          unless torrent.nil?
+            save_torrent(torrent, item.title)
+            add_to_history(record)
+          end
+
+        end
+      end
+      write_history!
+      @log.info("Finishing Blunderbuss Run.")
+    end
+  end
+end
+
+opts = Trollop::options do
+  opt :frequency, "If daemonized, the run frequency in seconds.", :default => 300
+  opt :pid_file,  "If daemonized, path to the pid file.",         :default => '/var/tmp/blunderbuss.pid'
+  opt :hist_file, "History file location.",                       :default => '/var/tmp/blunderbuss.dat'
+  opt :log_file,  "Log file location.",                           :default => '/var/tmp/blunderbuss.log'
+  opt :path,      "Path to download torrents to.",                :default => '/Archive/Incoming/Torrents/'
+  opt :feed_yaml, "YAML file with RSS feeds to use.",             :default => ENV['HOME'] + "/.blunderbuss.yaml"
+end
+
+usage = """Usage:
+
+       blunderbuss [cmd] --option
+
+Use --help for options"""
+
+if ARGV[0] == "run"
+  puts "Running Blunderbuss once."
+  Blunderbuss::Runner.new(opts).run
+elsif ARGV[0] == "start"
+  puts "Daemonizing Blunderbuss into the background."
+  puts "Pidfile is at #{opts[:pid_file]}."
+  puts "Logging to #{opts[:log_file]}"
+  Dante::Runner.new('Blunderbuss').execute(
+    :daemonize => true,
+    :pid_path  => opts[:pid_file],
+    :log_path  => opts[:log_file]) {
+    loop do
+      Blunderbuss::Runner.new(opts).run
+      sleep(opts[:frequency])
+    end
+  }
+elsif ARGV[0] == "stop"
+  if File.exists?(opts[:pid_file])
+    pid = File.read(opts[:pid_file]).chomp.to_i
+    puts "Attempting to stop Blunderbuss."
+
+    begin
+      Process.kill('INT', pid)
+    rescue Errno::ESRCH => e
+      puts "Process not found, are you sure it is still running?"
+    ensure
+      File.delete(opts[:pid_file])
+    end
+  else
+    puts "Pidfile doesn't exist, should be at #{opts[:pid_file]}."
+    exit -1
+  end
+  puts "Blunderbuss successfully stopped."
+  exit 0
+elsif ARGV[0] == "status"
+  if File.exists?(opts[:pid_file])
+    pid = File.read(opts[:pid_file]).chomp.to_i
+    begin
+      # Does not kill process, returns 1 if PID is found, errors if not. So,
+      # if it throws an error the PID ain't' there, otherwise we're good.
+      Process.kill(0, pid)
+    rescue Errno::ESRCH => e
+      puts "PID in #{opts[:pid_file]} not running. Blunderbuss is not running, removing pidfile."
+      File.delete(opts[:pid_file])
+    end
+    puts "Blunderbuss is running as #{pid}."
+  else
+    puts "Pidfile doesn't exist, should be at #{opts[:pid_file]}."
+    exit -1
+  end
+else
+  puts usage
+end
